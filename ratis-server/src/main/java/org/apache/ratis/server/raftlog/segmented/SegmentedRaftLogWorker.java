@@ -178,6 +178,8 @@ class SegmentedRaftLogWorker {
 
   private int flushTimes = 0;
 
+  private Timestamp lastFlushTimestamp;
+
   private final StateMachineDataPolicy stateMachineDataPolicy;
 
   SegmentedRaftLogWorker(RaftGroupMemberId memberId, StateMachine stateMachine, Runnable submitUpdateCommitEvent,
@@ -216,6 +218,8 @@ class SegmentedRaftLogWorker {
 
     final int bufferSize = RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
+
+    this.lastFlushTimestamp = Timestamp.currentTime();
   }
 
   void start(long latestIndex, long evictIndex, File openSegmentFile) throws IOException {
@@ -294,6 +298,10 @@ class SegmentedRaftLogWorker {
 
     while (running) {
       try {
+        if (shouldFlush()) {
+          raftLogMetrics.onRaftLogFlush();
+          flushWrites();
+        }
         Task task = queue.poll(ONE_SECOND);
         if (task != null) {
           task.stopTimerOnDequeue();
@@ -347,7 +355,8 @@ class SegmentedRaftLogWorker {
 
   private boolean shouldFlush() {
     return pendingFlushNum >= forceSyncNum ||
-        (pendingFlushNum > 0 && queue.isEmpty());
+        (pendingFlushNum > 0 && queue.isEmpty() &&
+                lastFlushTimestamp.elapsedTime().compareTo(TimeDuration.ONE_SECOND) > 0);
   }
 
   @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
@@ -365,8 +374,10 @@ class SegmentedRaftLogWorker {
         final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
         flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
         flushTimes++;
+        this.lastFlushTimestamp = Timestamp.currentTime();
         out.flush();
-        LOG.info("raft flush times: " + flushTimes + " queue Size: " + queue.getNumElements() + " is empty?: " + queue.isEmpty());
+        LOG.info("raft flush times: " + flushTimes + " queue Size: " + queue.getNumElements() +
+                " pendingFlushNum: " + pendingFlushNum + " forceNum: " + forceSyncNum);
         logSyncTimerContext.stop();
         if (!stateMachineDataPolicy.isSync()) {
           IOUtils.getFromFuture(f, () -> this + "-flushStateMachineData");
