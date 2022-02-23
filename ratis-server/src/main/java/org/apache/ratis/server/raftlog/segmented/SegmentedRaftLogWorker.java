@@ -176,6 +176,8 @@ class SegmentedRaftLogWorker {
   private final RaftServer.Division server;
   private int flushBatchSize;
 
+  private int flushTimes = 0;
+
   private final StateMachineDataPolicy stateMachineDataPolicy;
 
   SegmentedRaftLogWorker(RaftGroupMemberId memberId, StateMachine stateMachine, Runnable submitUpdateCommitEvent,
@@ -362,7 +364,9 @@ class SegmentedRaftLogWorker {
         }
         final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
         flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
+        flushTimes++;
         out.flush();
+        LOG.info("raft flush times: " + flushTimes + " queue Size: " + queue.getNumElements() + " is empty?: " + queue.isEmpty());
         logSyncTimerContext.stop();
         if (!stateMachineDataPolicy.isSync()) {
           IOUtils.getFromFuture(f, () -> this + "-flushStateMachineData");
