@@ -298,10 +298,6 @@ class SegmentedRaftLogWorker {
 
     while (running) {
       try {
-        if (shouldFlush()) {
-          raftLogMetrics.onRaftLogFlush();
-          flushWrites();
-        }
         Task task = queue.poll(ONE_SECOND);
         if (task != null) {
           task.stopTimerOnDequeue();
@@ -355,8 +351,7 @@ class SegmentedRaftLogWorker {
 
   private boolean shouldFlush() {
     return pendingFlushNum >= forceSyncNum ||
-        (pendingFlushNum > 0 && queue.isEmpty() &&
-                lastFlushTimestamp.elapsedTime().compareTo(TimeDuration.ONE_SECOND) > 0);
+        (pendingFlushNum > 0 && queue.isEmpty());
   }
 
   @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
@@ -374,8 +369,10 @@ class SegmentedRaftLogWorker {
         final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
         flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
         flushTimes++;
-        this.lastFlushTimestamp = Timestamp.currentTime();
-        out.flush();
+        if (lastFlushTimestamp.elapsedTime().compareTo(TimeDuration.valueOf(3, TimeUnit.SECONDS)) > 0) {
+          realFlush();
+          this.lastFlushTimestamp = Timestamp.currentTime();
+        }
         LOG.info("raft flush times: " + flushTimes + " queue Size: " + queue.getNumElements() +
                 " pendingFlushNum: " + pendingFlushNum + " forceNum: " + forceSyncNum);
         logSyncTimerContext.stop();
@@ -387,6 +384,11 @@ class SegmentedRaftLogWorker {
       }
       updateFlushedIndexIncreasingly();
     }
+  }
+
+  private void realFlush() throws IOException {
+    LOG.info("raft flush real");
+    out.flush();
   }
 
   private void updateFlushedIndexIncreasingly() {
