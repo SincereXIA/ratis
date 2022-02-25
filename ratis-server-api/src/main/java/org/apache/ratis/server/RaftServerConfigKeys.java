@@ -350,7 +350,7 @@ public interface RaftServerConfigKeys {
 
 
     String ASYNC_FLUSH_ENABLE_KEY = PREFIX + ".async.flush.enable";
-    boolean ASYNC_FLUSH_ENABLE_DEFAULT = false;
+    boolean ASYNC_FLUSH_ENABLE_DEFAULT = true;
     static boolean asyncFlushEnabled(RaftProperties properties) {
       return getBoolean(properties::getBoolean,
               ASYNC_FLUSH_ENABLE_KEY, ASYNC_FLUSH_ENABLE_DEFAULT, getDefaultLog());
