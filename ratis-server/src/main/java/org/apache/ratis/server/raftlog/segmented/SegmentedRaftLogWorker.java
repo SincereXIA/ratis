@@ -388,7 +388,9 @@ class SegmentedRaftLogWorker {
         if (stateMachineDataPolicy.isSync()) {
           stateMachineDataPolicy.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
-        outStreamFlushIfNecessary();
+        if (flushIntervalMin.getDuration() == 0) {
+          outStreamFlushIfNecessary();
+        }
         if (!stateMachineDataPolicy.isSync()) {
           IOUtils.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
@@ -400,7 +402,10 @@ class SegmentedRaftLogWorker {
   }
 
   private void outStreamFlushIfNecessary() throws IOException {
-    if (out != null && outStreamLastFlush.elapsedTime().compareTo(flushIntervalMin) > 0) {
+    if (out == null) {
+      return;
+    }
+    if (flushIntervalMin.getDuration() ==0 || outStreamLastFlush.elapsedTime().compareTo(flushIntervalMin) > 0) {
       final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
       flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
       out.flush();
