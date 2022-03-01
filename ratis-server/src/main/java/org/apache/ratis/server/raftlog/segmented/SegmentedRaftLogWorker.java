@@ -144,6 +144,7 @@ class SegmentedRaftLogWorker {
   private final WriteLogTasks writeTasks = new WriteLogTasks();
   private volatile boolean running = true;
   private final Thread workerThread;
+  private final Thread outStreamFlushThread;
 
   private final RaftStorage storage;
   private volatile SegmentedRaftLogOutputStream out;
@@ -205,6 +206,7 @@ class SegmentedRaftLogWorker {
     this.stateMachineDataPolicy = new StateMachineDataPolicy(properties, metricRegistry);
 
     this.workerThread = new Thread(this::run, name);
+    this.outStreamFlushThread = new Thread(this::checkAndFlush, name + "outStreamFlush");
 
     // Server Id can be null in unit tests
     metricRegistry.addDataQueueSizeGauge(queue);
@@ -231,11 +233,15 @@ class SegmentedRaftLogWorker {
       allocateSegmentedRaftLogOutputStream(openSegmentFile, true);
     }
     workerThread.start();
+    if (flushIntervalMin.getDuration() > 0) {
+      outStreamFlushThread.start();
+    }
   }
 
   void close() {
     this.running = false;
     workerThread.interrupt();
+    outStreamFlushThread.interrupt();
     try {
       workerThread.join(3000);
     } catch (InterruptedException ignored) {
@@ -326,9 +332,6 @@ class SegmentedRaftLogWorker {
           }
           task.done();
         }
-        if (flushIntervalMin.getDuration() > 0) {
-          outStreamFlushIfNecessary();
-        }
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         if (running) {
@@ -347,6 +350,18 @@ class SegmentedRaftLogWorker {
           LOG.error("{} hit exception", Thread.currentThread().getName(), e);
           Optional.ofNullable(server).ifPresent(RaftServer.Division::close);
         }
+      }
+    }
+  }
+
+  private void checkAndFlush() {
+    while (running) {
+      try {
+        outStreamFlushIfNecessary();
+        flushIntervalMin.sleep();
+      } catch (Exception e) {
+        LOG.error("{} hit exception", Thread.currentThread().getName(), e);
+        Optional.ofNullable(server).ifPresent(RaftServer.Division::close);
       }
     }
   }
@@ -385,7 +400,7 @@ class SegmentedRaftLogWorker {
   }
 
   private void outStreamFlushIfNecessary() throws IOException {
-    if (outStreamLastFlush.elapsedTime().compareTo(flushIntervalMin) > 0) {
+    if (out != null && outStreamLastFlush.elapsedTime().compareTo(flushIntervalMin) > 0) {
       final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
       flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
       out.flush();
