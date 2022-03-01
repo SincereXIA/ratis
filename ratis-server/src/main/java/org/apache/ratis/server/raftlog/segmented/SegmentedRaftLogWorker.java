@@ -176,7 +176,7 @@ class SegmentedRaftLogWorker {
   private final RaftServer.Division server;
   private int flushBatchSize;
 
-  private Timestamp lastFlush;
+  private Timestamp outStreamLastFlush;
   private final TimeDuration flushIntervalMin;
 
   private final StateMachineDataPolicy stateMachineDataPolicy;
@@ -217,7 +217,7 @@ class SegmentedRaftLogWorker {
 
     final int bufferSize = RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
-    this.lastFlush = Timestamp.currentTime();
+    this.outStreamLastFlush = Timestamp.currentTime();
     this.flushIntervalMin = RaftServerConfigKeys.Log.flushIntervalMin(properties);
   }
 
@@ -326,7 +326,9 @@ class SegmentedRaftLogWorker {
           }
           task.done();
         }
-        flushIfNecessary();
+        if (flushIntervalMin.getDuration() > 0) {
+          outStreamFlushIfNecessary();
+        }
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         if (running) {
@@ -355,7 +357,7 @@ class SegmentedRaftLogWorker {
     } else if (pendingFlushNum >= forceSyncNum) {
       return true;
     }
-    return pendingFlushNum > 0 && queue.isEmpty() && lastFlush.elapsedTime().compareTo(flushIntervalMin) > 0;
+    return pendingFlushNum > 0 && queue.isEmpty();
   }
 
   @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
@@ -371,18 +373,24 @@ class SegmentedRaftLogWorker {
         if (stateMachineDataPolicy.isSync()) {
           stateMachineDataPolicy.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
-        final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
-        flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
-        out.flush();
-        logSyncTimerContext.stop();
+        outStreamFlushIfNecessary();
         if (!stateMachineDataPolicy.isSync()) {
           IOUtils.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
       } finally {
         timerContext.stop();
-        lastFlush = Timestamp.currentTime();
       }
       updateFlushedIndexIncreasingly();
+    }
+  }
+
+  private void outStreamFlushIfNecessary() throws IOException {
+    if (outStreamLastFlush.elapsedTime().compareTo(flushIntervalMin) > 0) {
+      final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
+      flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
+      out.flush();
+      logSyncTimerContext.stop();
+      outStreamLastFlush = Timestamp.currentTime();
     }
   }
 
