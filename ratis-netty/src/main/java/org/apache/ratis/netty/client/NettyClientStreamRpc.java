@@ -191,13 +191,13 @@ public class NettyClientStreamRpc implements DataStreamClientRpc {
               }
 
               final Integer emptyId = queue.getEmptyId();
-              if (emptyId != null) {
-                timeoutScheduler.onTimeout(replyQueueGracePeriod,
-                    // remove the queue if the same queue has been empty for the entire grace period.
-                    () -> replies.computeIfPresent(clientInvocationId,
-                        (key, q) -> q == queue && emptyId.equals(q.getEmptyId())? null: q),
-                    LOG, () -> "Timeout check failed, clientInvocationId=" + clientInvocationId);
-              }
+//              if (emptyId != null) {
+//                timeoutScheduler.onTimeout(replyQueueGracePeriod,
+//                    // remove the queue if the same queue has been empty for the entire grace period.
+//                    () -> replies.computeIfPresent(clientInvocationId,
+//                        (key, q) -> q == queue && emptyId.equals(q.getEmptyId())? null: q),
+//                    LOG, () -> "Timeout check failed, clientInvocationId=" + clientInvocationId);
+//              }
             }
           }
         } catch (Throwable cause){
