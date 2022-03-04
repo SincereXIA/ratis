@@ -50,11 +50,7 @@ import java.util.LinkedList;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -182,6 +178,7 @@ class SegmentedRaftLogWorker {
 
   private Timestamp lastFlush;
   private final TimeDuration flushIntervalMin;
+  private final BlockingQueue<Runnable> flushExecutorWorkQueue;
 
   private final StateMachineDataPolicy stateMachineDataPolicy;
 
@@ -221,7 +218,9 @@ class SegmentedRaftLogWorker {
 
     final int bufferSize = RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
-    this.flushExecutor = Executors.newSingleThreadExecutor(ConcurrentUtils.newThreadFactory(name + "-flush"));
+    this.flushExecutorWorkQueue = new ArrayBlockingQueue<>(1);
+    this.flushExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+            this.flushExecutorWorkQueue, ConcurrentUtils.newThreadFactory(name + "-flush"));
     this.lastFlush = Timestamp.currentTime();
     this.flushIntervalMin = RaftServerConfigKeys.Log.flushIntervalMin(properties);
   }
@@ -378,7 +377,9 @@ class SegmentedRaftLogWorker {
           stateMachineDataPolicy.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
         flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
-        CompletableFuture.supplyAsync(this::flushOutStream, flushExecutor);
+        if (flushExecutorWorkQueue.isEmpty()) {
+          CompletableFuture.supplyAsync(this::flushOutStream, flushExecutor);
+        }
         if (!stateMachineDataPolicy.isSync()) {
           IOUtils.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
