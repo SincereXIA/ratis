@@ -50,11 +50,7 @@ import java.util.LinkedList;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -180,6 +176,8 @@ class SegmentedRaftLogWorker {
   private final RaftServer.Division server;
   private int flushBatchSize;
 
+  private final BlockingQueue<Runnable> flushExecutorWorkQueue;
+
   private final StateMachineDataPolicy stateMachineDataPolicy;
 
   SegmentedRaftLogWorker(RaftGroupMemberId memberId, StateMachine stateMachine, Runnable submitUpdateCommitEvent,
@@ -218,7 +216,9 @@ class SegmentedRaftLogWorker {
 
     final int bufferSize = RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
-    this.flushExecutor = Executors.newSingleThreadExecutor(ConcurrentUtils.newThreadFactory(name + "-flush"));
+    this.flushExecutorWorkQueue = new ArrayBlockingQueue<>(1);
+    this.flushExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+            this.flushExecutorWorkQueue, ConcurrentUtils.newThreadFactory(name + "-flush"));
   }
 
   void start(long latestIndex, long evictIndex, File openSegmentFile) throws IOException {
@@ -373,7 +373,9 @@ class SegmentedRaftLogWorker {
           stateMachineDataPolicy.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
         flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
-        CompletableFuture.supplyAsync(this::flushOutStream, flushExecutor);
+        if (flushExecutorWorkQueue.isEmpty()) {
+          CompletableFuture.supplyAsync(this::flushOutStream, flushExecutor);
+        }
         if (!stateMachineDataPolicy.isSync()) {
           IOUtils.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
@@ -386,14 +388,14 @@ class SegmentedRaftLogWorker {
 
   private Void flushOutStream() {
     final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
-       try {
-         out.flush();
-       } catch (IOException e) {
-         throw new CompletionException("Failed to flush", e);
-       } finally {
-         logSyncTimerContext.stop();
-       }
-       return null;
+    try {
+      out.flush();
+    } catch (IOException e) {
+       throw new CompletionException("Failed to flush", e);
+    } finally {
+      logSyncTimerContext.stop();
+    }
+    return null;
   }
 
   private void updateFlushedIndexIncreasingly() {
