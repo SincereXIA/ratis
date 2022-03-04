@@ -51,7 +51,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -133,6 +137,77 @@ class SegmentedRaftLogWorker {
     }
   }
 
+  class FlushWorker {
+    /** The largest index of the log entry that has been flushed. */
+    private final RaftLogIndex flushIndex = new RaftLogIndex("flushIndex", 0);
+    /** The future of the last task. */
+    private final AtomicReference<CompletableFuture<Long>> future
+        = new AtomicReference<>(CompletableFuture.completedFuture(null));
+    private final ExecutorService executor;
+
+    FlushWorker(String name) {
+      this.executor = Executors.newSingleThreadExecutor(ConcurrentUtils.newThreadFactory(name + "-flush"));
+    }
+
+    long getFlushIndex() {
+      return flushIndex.get();
+    }
+
+    /**
+     * Wait for the previous future to complete and then update the flush index.
+     * @return the updated flush index
+     */
+    long waitAndUpdateFlushIndex(Consumer<RaftLogIndex> updateMethod) {
+      return future.updateAndGet(previous -> previous.thenApply(i -> updateFlushIndex(updateMethod))).join();
+    }
+
+    private long updateFlushIndex(Consumer<RaftLogIndex> updateMethod) {
+      updateMethod.accept(flushIndex);
+      return flushIndex.get();
+    }
+
+    CompletableFuture<Long> submitFlush(long lastWritten, CompletableFuture<Void> other) throws IOException {
+      final CompletableFuture<Long> previous = future.getAndUpdate(p -> flushAsync(p, lastWritten, other));
+      if (previous.isCompletedExceptionally()) {
+        try {
+          previous.join();
+        } catch (CompletionException e) {
+          throw IOUtils.asIOException(JavaUtils.unwrapCompletionException(e));
+        }
+      }
+      return previous;
+    }
+
+    /**
+     * Flush asynchronously.
+     * 1) Wait for both the previous flush and the other future.
+     * 2) Run the flush for the given last written index.
+     */
+    private CompletableFuture<Long> flushAsync(CompletableFuture<Long> previous,
+        long lastWritten, CompletableFuture<Void> other) {
+      return previous.thenApplyAsync(previousFlushIndex -> flush(lastWritten), executor)
+          .thenCombine(other, (lastWrittenIndex, dummy) -> lastWrittenIndex)
+          .thenApply(i -> updateFlushIndex(flushIndex -> flushIndex.updateIncreasingly(lastWritten, traceIndexChange)))
+          .thenApply(SegmentedRaftLogWorker.this::postUpdateFlushedIndex);
+    }
+
+    private Long flush(long lastWritten) {
+      final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
+      try {
+        out.flush();
+      } catch (IOException e) {
+        throw new CompletionException("Failed to flush " + lastWritten, e);
+      } finally {
+        logSyncTimerContext.stop();
+      }
+      return lastWritten;
+    }
+
+    void shutdown() {
+      executor.shutdown();
+    }
+  }
+
   private final Consumer<Object> infoIndexChange = s -> LOG.info("{}: {}", this, s);
   private final Consumer<Object> traceIndexChange = s -> LOG.trace("{}: {}", this, s);
 
@@ -144,6 +219,7 @@ class SegmentedRaftLogWorker {
   private final WriteLogTasks writeTasks = new WriteLogTasks();
   private volatile boolean running = true;
   private final Thread workerThread;
+  private final FlushWorker flushWorker;
 
   private final RaftStorage storage;
   private volatile SegmentedRaftLogOutputStream out;
@@ -163,8 +239,6 @@ class SegmentedRaftLogWorker {
   private int pendingFlushNum = 0;
   /** the index of the last entry that has been written */
   private long lastWrittenIndex;
-  /** the largest index of the entry that has been flushed */
-  private final RaftLogIndex flushIndex = new RaftLogIndex("flushIndex", 0);
   /** the index up to which cache can be evicted - max of snapshotIndex and
    * largest index in a closed segment */
   private final RaftLogIndex safeCacheEvictIndex = new RaftLogIndex("safeCacheEvictIndex", 0);
@@ -219,12 +293,13 @@ class SegmentedRaftLogWorker {
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
     this.lastFlush = Timestamp.currentTime();
     this.flushIntervalMin = RaftServerConfigKeys.Log.flushIntervalMin(properties);
+    this.flushWorker = new FlushWorker(name);
   }
 
   void start(long latestIndex, long evictIndex, File openSegmentFile) throws IOException {
     LOG.trace("{} start(latestIndex={}, openSegmentFile={})", name, latestIndex, openSegmentFile);
     lastWrittenIndex = latestIndex;
-    flushIndex.setUnconditionally(latestIndex, infoIndexChange);
+    flushWorker.waitAndUpdateFlushIndex(flushIndex -> flushIndex.setUnconditionally(latestIndex, infoIndexChange));
     safeCacheEvictIndex.setUnconditionally(evictIndex, infoIndexChange);
     if (openSegmentFile != null) {
       Preconditions.assertTrue(openSegmentFile.exists());
@@ -236,6 +311,7 @@ class SegmentedRaftLogWorker {
   void close() {
     this.running = false;
     workerThread.interrupt();
+    flushWorker.shutdown();
     try {
       workerThread.join(3000);
     } catch (InterruptedException ignored) {
@@ -252,7 +328,7 @@ class SegmentedRaftLogWorker {
   void syncWithSnapshot(long lastSnapshotIndex) {
     queue.clear();
     lastWrittenIndex = lastSnapshotIndex;
-    flushIndex.setUnconditionally(lastSnapshotIndex, infoIndexChange);
+    flushWorker.waitAndUpdateFlushIndex(flushIndex -> flushIndex.setUnconditionally(lastSnapshotIndex, infoIndexChange));
     safeCacheEvictIndex.setUnconditionally(lastSnapshotIndex, infoIndexChange);
     pendingFlushNum = 0;
   }
@@ -364,38 +440,28 @@ class SegmentedRaftLogWorker {
       raftLogMetrics.onRaftLogFlush();
       LOG.debug("{}: flush {}", name, out);
       final Timer.Context timerContext = logFlushTimer.time();
+      final long lastWritten = lastWrittenIndex;
       try {
         final CompletableFuture<Void> f = stateMachine != null ?
-            stateMachine.data().flush(lastWrittenIndex) :
-            CompletableFuture.completedFuture(null);
+            stateMachine.data().flush(lastWritten) : CompletableFuture.completedFuture(null);
         if (stateMachineDataPolicy.isSync()) {
           stateMachineDataPolicy.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
-        final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
-        flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
-        out.flush();
-        logSyncTimerContext.stop();
-        if (!stateMachineDataPolicy.isSync()) {
-          IOUtils.getFromFuture(f, () -> this + "-flushStateMachineData");
-        }
+        final CompletableFuture<Long> previous = flushWorker.submitFlush(lastWritten, f);
+        previous.thenAccept(i -> flushBatchSize = (int)(lastWritten - i));
+        pendingFlushNum = 0;
       } finally {
         timerContext.stop();
-        lastFlush = Timestamp.currentTime();
       }
-      updateFlushedIndexIncreasingly();
     }
   }
 
-  private void updateFlushedIndexIncreasingly() {
-    final long i = lastWrittenIndex;
-    flushIndex.updateIncreasingly(i, traceIndexChange);
-    postUpdateFlushedIndex();
+  private Long postUpdateFlushedIndex(long i) {
+    lastFlush = Timestamp.currentTime();
     writeTasks.updateIndex(i);
-  }
 
-  private void postUpdateFlushedIndex() {
-    pendingFlushNum = 0;
     Optional.ofNullable(submitUpdateCommitEvent).ifPresent(Runnable::run);
+    return i;
   }
 
   /**
@@ -572,7 +638,9 @@ class SegmentedRaftLogWorker {
         FileUtils.deleteFile(openFile);
         LOG.info("{}: Deleted empty log segment {}", name, openFile);
       }
-      updateFlushedIndexIncreasingly();
+      flushWorker.waitAndUpdateFlushIndex(flushIndex -> flushIndex.updateIncreasingly(lastWrittenIndex, traceIndexChange));
+      postUpdateFlushedIndex(lastWrittenIndex);
+      pendingFlushNum = 0;
       safeCacheEvictIndex.updateToMax(endIndex, traceIndexChange);
     }
 
@@ -673,9 +741,10 @@ class SegmentedRaftLogWorker {
       if (stateMachineFuture != null) {
         IOUtils.getFromFuture(stateMachineFuture, () -> this + "-truncateStateMachineData");
       }
-      flushIndex.setUnconditionally(lastWrittenIndex, infoIndexChange);
+      flushWorker.waitAndUpdateFlushIndex(flushIndex -> flushIndex.setUnconditionally(lastWrittenIndex, infoIndexChange));
       safeCacheEvictIndex.setUnconditionally(lastWrittenIndex, infoIndexChange);
-      postUpdateFlushedIndex();
+      pendingFlushNum = 0;
+      Optional.ofNullable(submitUpdateCommitEvent).ifPresent(Runnable::run);
     }
 
     @Override
@@ -695,7 +764,7 @@ class SegmentedRaftLogWorker {
   }
 
   long getFlushIndex() {
-    return flushIndex.get();
+    return flushWorker.getFlushIndex();
   }
 
   long getSafeCacheEvictIndex() {
