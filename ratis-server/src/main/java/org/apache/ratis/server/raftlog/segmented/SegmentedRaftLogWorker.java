@@ -174,6 +174,7 @@ class SegmentedRaftLogWorker {
   private final RaftLogIndex safeCacheEvictIndex = new RaftLogIndex("safeCacheEvictIndex", 0);
 
   private final int forceSyncNum;
+  private final boolean asyncFlushEnabled;
 
   private final long segmentMaxSize;
   private final long preallocatedSize;
@@ -215,6 +216,7 @@ class SegmentedRaftLogWorker {
     this.raftLogSyncTimer = metricRegistry.getRaftLogSyncTimer();
     this.raftLogQueueingTimer = metricRegistry.getRaftLogQueueTimer();
     this.raftLogEnqueueingDelayTimer = metricRegistry.getRaftLogEnqueueDelayTimer();
+    this.asyncFlushEnabled = RaftServerConfigKeys.Log.asyncFlushEnabled(properties);
 
     final int bufferSize = RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
@@ -373,7 +375,11 @@ class SegmentedRaftLogWorker {
           stateMachineDataPolicy.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
         flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
-        CompletableFuture.supplyAsync(this::flushOutStream, flushExecutor);
+        if (asyncFlushEnabled) {
+          CompletableFuture.supplyAsync(this::flushOutStream, flushExecutor);
+        } else {
+          flushOutStream();
+        }
         if (!stateMachineDataPolicy.isSync()) {
           IOUtils.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
