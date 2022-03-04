@@ -349,7 +349,7 @@ public interface RaftServerConfigKeys {
     }
 
     String FLUSH_INTERVAL_MIN_KEY = PREFIX + ".flush.interval.min";
-    TimeDuration FLUSH_INTERVAL_MIN_DEFAULT = TimeDuration.ZERO;
+    TimeDuration FLUSH_INTERVAL_MIN_DEFAULT = TimeDuration.valueOf(3, TimeUnit.SECONDS);
     static TimeDuration flushIntervalMin(RaftProperties properties) {
       return getTimeDuration(properties.getTimeDuration(FLUSH_INTERVAL_MIN_DEFAULT.getUnit()),
               FLUSH_INTERVAL_MIN_KEY, FLUSH_INTERVAL_MIN_DEFAULT, getDefaultLog());
