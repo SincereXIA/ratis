@@ -348,6 +348,15 @@ public interface RaftServerConfigKeys {
       setInt(properties::setInt, FORCE_SYNC_NUM_KEY, forceSyncNum);
     }
 
+    String ASYNC_FLUSH_ENABLED_KEY = PREFIX + ".async.flush.enabled";
+    boolean ASYNC_FLUSH_ENABLED_DEFAULT = false;
+    static boolean asyncFlushEnabled(RaftProperties properties) {
+      return getBoolean(properties::getBoolean,
+              ASYNC_FLUSH_ENABLED_KEY, ASYNC_FLUSH_ENABLED_DEFAULT, getDefaultLog());
+    }
+    static void setAsyncFlushEnabled(RaftProperties properties, boolean asyncFlush) {
+      setBoolean(properties::setBoolean, ASYNC_FLUSH_ENABLED_KEY, asyncFlush);
+    }
 
     String FLUSH_INTERVAL_MIN_KEY = PREFIX + ".flush.interval.min";
     TimeDuration FLUSH_INTERVAL_MIN_DEFAULT = TimeDuration.ZERO;
