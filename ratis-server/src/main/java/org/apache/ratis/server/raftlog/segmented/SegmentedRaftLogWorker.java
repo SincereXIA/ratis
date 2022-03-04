@@ -180,8 +180,6 @@ class SegmentedRaftLogWorker {
   private final RaftServer.Division server;
   private int flushBatchSize;
 
-  private Timestamp lastFlush;
-
   private final StateMachineDataPolicy stateMachineDataPolicy;
 
   SegmentedRaftLogWorker(RaftGroupMemberId memberId, StateMachine stateMachine, Runnable submitUpdateCommitEvent,
@@ -220,7 +218,6 @@ class SegmentedRaftLogWorker {
 
     final int bufferSize = RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
-    this.lastFlush = Timestamp.currentTime();
     this.flushExecutor = Executors.newSingleThreadExecutor(ConcurrentUtils.newThreadFactory(name + "-flush"));
   }
 
@@ -382,7 +379,6 @@ class SegmentedRaftLogWorker {
         }
       } finally {
         timerContext.stop();
-        lastFlush = Timestamp.currentTime();
       }
       updateFlushedIndexIncreasingly();
     }
