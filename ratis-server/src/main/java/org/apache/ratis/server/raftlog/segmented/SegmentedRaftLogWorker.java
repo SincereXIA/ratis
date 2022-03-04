@@ -181,8 +181,6 @@ class SegmentedRaftLogWorker {
   private int flushBatchSize;
 
   private Timestamp lastFlush;
-  private final TimeDuration flushIntervalMin;
-  private final boolean asyncFlushEnabled;
 
   private final StateMachineDataPolicy stateMachineDataPolicy;
 
@@ -223,8 +221,6 @@ class SegmentedRaftLogWorker {
     final int bufferSize = RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
     this.lastFlush = Timestamp.currentTime();
-    this.flushIntervalMin = RaftServerConfigKeys.Log.flushIntervalMin(properties);
-    this.asyncFlushEnabled = RaftServerConfigKeys.Log.asyncFlushEnabled(properties);
     this.flushExecutor = Executors.newSingleThreadExecutor(ConcurrentUtils.newThreadFactory(name + "-flush"));
   }
 
@@ -363,7 +359,7 @@ class SegmentedRaftLogWorker {
     } else if (pendingFlushNum >= forceSyncNum) {
       return true;
     }
-    return pendingFlushNum > 0 && queue.isEmpty() && lastFlush.elapsedTime().compareTo(flushIntervalMin) > 0;
+    return pendingFlushNum > 0 && queue.isEmpty();
   }
 
   @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
@@ -380,11 +376,7 @@ class SegmentedRaftLogWorker {
           stateMachineDataPolicy.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
         flushBatchSize = (int)(lastWrittenIndex - flushIndex.get());
-        if (asyncFlushEnabled) {
-          CompletableFuture.supplyAsync(this::flushOutStream, flushExecutor);
-        } else {
-          flushOutStream();
-        }
+        CompletableFuture.supplyAsync(this::flushOutStream, flushExecutor);
         if (!stateMachineDataPolicy.isSync()) {
           IOUtils.getFromFuture(f, () -> this + "-flushStateMachineData");
         }
