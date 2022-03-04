@@ -180,6 +180,9 @@ class SegmentedRaftLogWorker {
   private final RaftServer.Division server;
   private int flushBatchSize;
 
+  private Timestamp lastFlush;
+  private final TimeDuration flushIntervalMin;
+
   private final StateMachineDataPolicy stateMachineDataPolicy;
 
   SegmentedRaftLogWorker(RaftGroupMemberId memberId, StateMachine stateMachine, Runnable submitUpdateCommitEvent,
@@ -219,6 +222,8 @@ class SegmentedRaftLogWorker {
     final int bufferSize = RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
     this.flushExecutor = Executors.newSingleThreadExecutor(ConcurrentUtils.newThreadFactory(name + "-flush"));
+    this.lastFlush = Timestamp.currentTime();
+    this.flushIntervalMin = RaftServerConfigKeys.Log.flushIntervalMin(properties);
   }
 
   void start(long latestIndex, long evictIndex, File openSegmentFile) throws IOException {
@@ -385,15 +390,24 @@ class SegmentedRaftLogWorker {
   }
 
   private Void flushOutStream() {
+    try {
+      flushIntervalMin.subtract(this.lastFlush.elapsedTime()).sleep();
+    } catch (Exception e) {
+      if (running) {
+        LOG.warn("{} got interrupted while still running",
+                Thread.currentThread().getName());
+      }
+    }
     final Timer.Context logSyncTimerContext = raftLogSyncTimer.time();
-       try {
-         out.flush();
-       } catch (IOException e) {
-         throw new CompletionException("Failed to flush", e);
-       } finally {
-         logSyncTimerContext.stop();
-       }
-       return null;
+    try {
+      out.flush();
+      this.lastFlush = Timestamp.currentTime();
+    } catch (IOException e) {
+       throw new CompletionException("Failed to flush", e);
+    } finally {
+      logSyncTimerContext.stop();
+    }
+    return null;
   }
 
   private void updateFlushedIndexIncreasingly() {
