@@ -50,11 +50,7 @@ import java.util.LinkedList;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -144,9 +140,14 @@ class SegmentedRaftLogWorker {
     private final AtomicReference<CompletableFuture<Long>> future
         = new AtomicReference<>(CompletableFuture.completedFuture(null));
     private final ExecutorService executor;
+    private final BlockingQueue<Runnable> flushExecutorWorkQueue;
+    private final boolean unsafeFlushEnabled;
 
-    FlushWorker(String name) {
-      this.executor = Executors.newSingleThreadExecutor(ConcurrentUtils.newThreadFactory(name + "-flush"));
+    FlushWorker(String name, boolean unsafeFlushEnabled) {
+      this.flushExecutorWorkQueue = new ArrayBlockingQueue<>(1);
+      this.executor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+              this.flushExecutorWorkQueue, ConcurrentUtils.newThreadFactory(name + "-flush"));
+      this.unsafeFlushEnabled = unsafeFlushEnabled;
     }
 
     long getFlushIndex() {
@@ -185,8 +186,16 @@ class SegmentedRaftLogWorker {
      */
     private CompletableFuture<Long> flushAsync(CompletableFuture<Long> previous,
         long lastWritten, CompletableFuture<Void> other) {
-      return previous.thenApplyAsync(previousFlushIndex -> flush(lastWritten), executor)
-          .thenCombine(other, (lastWrittenIndex, dummy) -> lastWrittenIndex)
+
+      if (flushExecutorWorkQueue.isEmpty()) {
+        if (unsafeFlushEnabled) {
+          CompletableFuture.runAsync(() -> flush(lastWritten) , executor);
+        }else {
+          previous.thenApplyAsync(previousFlushIndex -> flush(lastWritten), executor);
+        }
+      }
+
+      return previous.thenCombine(other, (lastWrittenIndex, dummy) -> lastWrittenIndex)
           .thenApply(i -> updateFlushIndex(flushIndex -> flushIndex.updateIncreasingly(lastWritten, traceIndexChange)))
           .thenApply(SegmentedRaftLogWorker.this::postUpdateFlushedIndex);
     }
@@ -293,7 +302,7 @@ class SegmentedRaftLogWorker {
     this.writeBuffer = ByteBuffer.allocateDirect(bufferSize);
     this.lastFlush = Timestamp.currentTime();
     this.flushIntervalMin = RaftServerConfigKeys.Log.flushIntervalMin(properties);
-    this.flushWorker = new FlushWorker(name);
+    this.flushWorker = new FlushWorker(name, RaftServerConfigKeys.Log.unsafeFlushEnabled(properties));
   }
 
   void start(long latestIndex, long evictIndex, File openSegmentFile) throws IOException {
@@ -431,7 +440,7 @@ class SegmentedRaftLogWorker {
     } else if (pendingFlushNum >= forceSyncNum) {
       return true;
     }
-    return pendingFlushNum > 0 && queue.isEmpty() && lastFlush.elapsedTime().compareTo(flushIntervalMin) > 0;
+    return pendingFlushNum > 0 && queue.isEmpty();
   }
 
   @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
