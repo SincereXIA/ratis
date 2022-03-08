@@ -32,7 +32,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.concurrent.locks.Lock;
 import java.util.zip.Checksum;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class SegmentedRaftLogOutputStream implements Closeable {
   private static final Logger LOG = LoggerFactory.getLogger(SegmentedRaftLogOutputStream.class);
@@ -67,7 +69,9 @@ public class SegmentedRaftLogOutputStream implements Closeable {
       // write header
       preallocateIfNecessary(SegmentedRaftLogFormat.getHeaderLength());
       SegmentedRaftLogFormat.applyHeaderTo(CheckedConsumer.asCheckedFunction(out::write));
-      out.flush();
+      synchronized (out) {
+        out.flush();
+      }
     }
   }
 
@@ -97,7 +101,9 @@ public class SegmentedRaftLogOutputStream implements Closeable {
     checksum.update(buf, 0, proto);
     ByteBuffer.wrap(buf, proto, 4).putInt((int) checksum.getValue());
 
-    out.write(buf);
+    synchronized (out) {
+      out.write(buf);
+    }
   }
 
   @Override
@@ -115,7 +121,9 @@ public class SegmentedRaftLogOutputStream implements Closeable {
    */
   public void flush() throws IOException {
     try {
-      out.flush();
+      synchronized (out) {
+        out.flush();
+      }
     } catch (IOException ioe) {
       throw new IOException("Failed to flush " + this, ioe);
     }
