@@ -189,8 +189,18 @@ class SegmentedRaftLogWorker {
 
       if (flushExecutorWorkQueue.isEmpty()) {
         if (unsafeFlushEnabled) {
-          CompletableFuture.runAsync(() -> flush(lastWritten) , executor);
-        }else {
+          CompletableFuture.runAsync(() -> {
+            try {
+              flushIntervalMin.subtract(lastFlush.elapsedTime()).sleep();
+            } catch (InterruptedException e) {
+              if (running) {
+                LOG.warn("{} got interrupted while still running",
+                        Thread.currentThread().getName());
+              }
+            }
+            flush(lastWritten);
+          } , executor);
+        } else {
           previous.thenApplyAsync(previousFlushIndex -> flush(lastWritten), executor);
         }
       }
